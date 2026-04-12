@@ -114,7 +114,8 @@ st.subheader("Mapa do Município")
 fig_map = plot_grid_map(
     snapshot["grid"],
     boundaries=snapshot.get("boundaries"),
-    figsize=(8, 8),
+    figsize=(10, 10),
+    dpi=150,
 )
 st.pyplot(fig_map, use_container_width=True)
 

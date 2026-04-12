@@ -47,43 +47,49 @@ def _apply_style(fig, ax):
     ax.grid(True, alpha=GRID_ALPHA, linestyle=":", color="#555555")
 
 
-def plot_grid_map(grid_array, boundaries=None, figsize=(8, 8)):
-    """Painel 1: mapa do município (grid colorido)."""
+def plot_grid_map(grid_array, boundaries=None, figsize=(10, 10), dpi=150):
+    """Painel 1: mapa do município (grid colorido com alta resolução)."""
     N = grid_array.shape[0]
     rgb = np.zeros((N, N, 3))
     for state, color in COLORS.items():
         mask = grid_array == state
         rgb[mask] = color
 
-    fig, ax = plt.subplots(1, 1, figsize=figsize)
+    fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=dpi)
     _apply_style(fig, ax)
     ax.imshow(rgb, origin="upper", interpolation="nearest")
 
-    # Limites das propriedades
+    # Limites das propriedades — linhas visíveis
     if boundaries:
         for b in boundaries:
-            edgecolor = "#cc3333" if b["embargoed"] else "#555555"
-            linewidth = 1.5 if b["embargoed"] else 0.5
+            if b["embargoed"]:
+                edgecolor = "#ff4444"
+                linewidth = 2.0
+                linestyle = "--"
+            else:
+                edgecolor = "#aaaaaa"
+                linewidth = 1.0
+                linestyle = "-"
             rect = mpatches.Rectangle(
                 (b["x0"] - 0.5, b["y0"] - 0.5),
                 b["w"], b["h"],
                 linewidth=linewidth,
                 edgecolor=edgecolor,
                 facecolor="none",
-                linestyle="-" if not b["embargoed"] else "--",
+                linestyle=linestyle,
             )
             ax.add_patch(rect)
 
-    # Legenda
+    # Legenda (sem Water e APP)
     legend_items = []
     for state in [FOREST, PASTURE, SOY, DEGRADED_PASTURE, REGENERATING,
-                  APP, LEGAL_RESERVE, WATER, ROAD, EMBARGOED]:
+                  LEGAL_RESERVE, ROAD, EMBARGOED]:
         patch = mpatches.Patch(color=COLORS[state], label=STATE_NAMES[state])
         legend_items.append(patch)
 
     legend = ax.legend(
         handles=legend_items, loc="upper right",
-        fontsize=7, framealpha=0.8,
+        fontsize=8, framealpha=0.85,
         facecolor=PANEL_BG, edgecolor="#444",
         labelcolor=TEXT_COLOR,
     )

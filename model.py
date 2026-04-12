@@ -465,12 +465,6 @@ class DeforestationModel(Model):
         # Criar rede de estradas (simples: cruz central + bordas)
         self._create_roads(N)
 
-        # Criar corpos d'água
-        self._create_water(N)
-
-        # Criar APP ao redor da água
-        self._create_app(N)
-
         # Criar propriedades
         self._agent_id_counter = cell_id
         self.landholders = []

@@ -27,8 +27,19 @@ st.markdown("""
         font-family: Georgia, serif;
         color: #e0e0e0;
     }
-    .stSlider label {
+    .stSlider label, .stSlider p, .stSlider div {
         font-family: Georgia, serif;
+        color: #e0e0e0 !important;
+    }
+    .stSidebar label, .stSidebar p, .stSidebar span,
+    .stSidebar .stMarkdown, .stSidebar [data-testid="stWidgetLabel"] {
+        color: #e0e0e0 !important;
+    }
+    .stSidebar h1, .stSidebar h2, .stSidebar h3, .stSidebar h4 {
+        color: #f0f0f0 !important;
+    }
+    .stNumberInput label {
+        color: #e0e0e0 !important;
     }
     .metric-card {
         background-color: #1e1e1e;
