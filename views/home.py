@@ -8,6 +8,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import time
 import streamlit as st
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 from model import DeforestationModel
 from viz import plot_grid_map, plot_trajectory, plot_metrics_bar
@@ -77,7 +80,6 @@ if not history:
 # ── Controles: slider de ano + botão Play ───────────────────────────
 max_year = len(history) - 1
 
-# Inicializar estado do play
 if "playing" not in st.session_state:
     st.session_state.playing = False
 if "play_year" not in st.session_state:
@@ -85,17 +87,13 @@ if "play_year" not in st.session_state:
 
 ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([1, 1, 6])
 with ctrl_col1:
-    play_btn = st.button("▶ Play", use_container_width=True)
+    if st.button("▶ Play", use_container_width=True):
+        st.session_state.playing = True
+        st.session_state.play_year = 0
 with ctrl_col2:
-    stop_btn = st.button("⏹ Stop", use_container_width=True)
+    if st.button("⏹ Stop", use_container_width=True):
+        st.session_state.playing = False
 
-if play_btn:
-    st.session_state.playing = True
-    st.session_state.play_year = 0
-if stop_btn:
-    st.session_state.playing = False
-
-# Se play está ativo, auto-avançar
 if st.session_state.playing:
     selected_year = st.session_state.play_year
     if selected_year >= max_year:
@@ -109,13 +107,14 @@ else:
 
 snapshot = history[selected_year]
 
-# ── Métricas rápidas ────────────────────────────────────────────────
+# ── Métricas rápidas (com HTML para garantir visibilidade) ──────────
 st.markdown(f"### Ano {snapshot['year']} de {max_year}")
 
 col1, col2, col3, col4, col5 = st.columns(5)
 with col1:
+    delta_forest = snapshot['pct_forest'] - history[0]['pct_forest']
     st.metric("Floresta", f"{snapshot['pct_forest']:.1f}%",
-              delta=f"{snapshot['pct_forest'] - history[0]['pct_forest']:.1f}pp")
+              delta=f"{delta_forest:.1f}pp")
 with col2:
     st.metric("Pastagem", f"{snapshot['pct_pasture']:.1f}%")
 with col3:
@@ -128,43 +127,52 @@ with col5:
               delta="Compensa" if C > 0 else "Não compensa",
               delta_color="inverse")
 
-# ── Indicadores de dissuasão (legíveis) ─────────────────────────────
-d1, d2, d3, d4 = st.columns(4)
-with d1:
-    st.markdown(f"**VD admin:** R$ {snapshot['VD_admin']:,.2f}/ha")
-with d2:
-    st.markdown(f"**VD ACP:** R$ {snapshot['VD_acp']:,.2f}/ha")
-with d3:
-    st.markdown(f"**VD total:** R$ {snapshot['VD_total']:,.2f}/ha")
-with d4:
-    st.markdown(f"**VE:** R$ {snapshot['VE']:,.0f}/ha")
+# Indicadores de dissuasão em HTML explícito para garantir contraste
+st.markdown(
+    f"""<div style="display:flex; gap:2rem; padding:8px 0; font-family:Georgia,serif;">
+    <span style="color:#ffffff;"><b>VD admin:</b> R$ {snapshot['VD_admin']:,.2f}/ha</span>
+    <span style="color:#ffffff;"><b>VD ACP:</b> R$ {snapshot['VD_acp']:,.2f}/ha</span>
+    <span style="color:#ffffff;"><b>VD total:</b> R$ {snapshot['VD_total']:,.2f}/ha</span>
+    <span style="color:#ffffff;"><b>VE:</b> R$ {snapshot['VE']:,.0f}/ha</span>
+    </div>""",
+    unsafe_allow_html=True,
+)
 
-# ── 3 Painéis ───────────────────────────────────────────────────────
 st.markdown("---")
 
-# Painel 1: Mapa
-st.subheader("Mapa do Município")
-map_placeholder = st.empty()
+# ── Criar placeholders fixos ANTES do loop de play ──────────────────
+# Isso evita que a página "pisque" ao rerun — os containers são estáveis
+ph_map_title = st.empty()
+ph_map = st.empty()
+ph_traj_title = st.empty()
+ph_traj = st.empty()
+ph_bar_title = st.empty()
+ph_bar = st.empty()
+ph_table = st.empty()
+
+# ── Preencher os placeholders ────────────────────────────────────────
+ph_map_title.subheader("Mapa do Município")
 fig_map = plot_grid_map(
     snapshot["grid"],
     boundaries=snapshot.get("boundaries"),
     figsize=(10, 10),
     dpi=150,
 )
-map_placeholder.pyplot(fig_map, use_container_width=True)
+ph_map.pyplot(fig_map, use_container_width=True)
+plt.close(fig_map)
 
-# Painel 2: Trajetória
-st.subheader("Trajetória Temporal")
+ph_traj_title.subheader("Trajetória Temporal")
 fig_traj = plot_trajectory(history, figsize=(12, 6))
-st.pyplot(fig_traj, use_container_width=True)
+ph_traj.pyplot(fig_traj, use_container_width=True)
+plt.close(fig_traj)
 
-# Painel 3: Métricas do ano
-st.subheader("Métricas Detalhadas")
+ph_bar_title.subheader("Métricas Detalhadas")
 fig_bar = plot_metrics_bar(snapshot, figsize=(12, 4.5))
-st.pyplot(fig_bar, use_container_width=True)
+ph_bar.pyplot(fig_bar, use_container_width=True)
+plt.close(fig_bar)
 
-# ── Tabela de fiscalização ──────────────────────────────────────────
-with st.expander("Dados de fiscalização por ano"):
+# Tabela
+with ph_table.expander("Dados de fiscalização por ano"):
     import pandas as pd
     rows = []
     for h in history:
@@ -183,8 +191,8 @@ with st.expander("Dados de fiscalização por ano"):
     df = pd.DataFrame(rows)
     st.dataframe(df, use_container_width=True, hide_index=True)
 
-# ── Lógica de auto-play (rerun) ─────────────────────────────────────
+# ── Auto-play: avança e re-executa ──────────────────────────────────
 if st.session_state.playing and selected_year < max_year:
-    time.sleep(0.8)
+    time.sleep(1.0)
     st.session_state.play_year = selected_year + 1
     st.rerun()

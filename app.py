@@ -41,21 +41,34 @@ st.markdown("""
     .stNumberInput label {
         color: #e0e0e0 !important;
     }
-    .metric-card {
-        background-color: #1e1e1e;
-        border: 1px solid #333;
-        border-radius: 8px;
-        padding: 12px 16px;
-        margin: 4px 0;
+    /* Métricas st.metric — forçar texto visível */
+    [data-testid="stMetricLabel"] {
+        color: #cccccc !important;
     }
-    .metric-label {
-        color: #999;
-        font-size: 0.85em;
+    [data-testid="stMetricLabel"] label,
+    [data-testid="stMetricLabel"] p,
+    [data-testid="stMetricLabel"] div {
+        color: #cccccc !important;
     }
-    .metric-value {
-        color: #e0e0e0;
-        font-size: 1.3em;
-        font-weight: bold;
+    [data-testid="stMetricValue"] {
+        color: #ffffff !important;
+    }
+    [data-testid="stMetricValue"] div {
+        color: #ffffff !important;
+    }
+    [data-testid="stMetricDelta"] {
+        color: inherit !important;
+    }
+    /* Fallback: qualquer texto dentro de metric */
+    [data-testid="metric-container"] {
+        color: #ffffff !important;
+    }
+    [data-testid="metric-container"] label {
+        color: #cccccc !important;
+    }
+    [data-testid="metric-container"] [data-testid="stMetricValue"] {
+        color: #ffffff !important;
+        font-size: 1.8rem !important;
     }
 </style>
 """, unsafe_allow_html=True)
