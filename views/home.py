@@ -1,11 +1,12 @@
 """
-Página principal de simulação — sliders + 3 painéis visuais.
+Página principal de simulação — sliders + 3 painéis visuais + botão Play.
 """
 
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import time
 import streamlit as st
 import numpy as np
 from model import DeforestationModel
@@ -49,7 +50,6 @@ with st.sidebar:
 # ── Cache da simulação ──────────────────────────────────────────────
 @st.cache_data(show_spinner="Rodando simulação...")
 def run_simulation(params_tuple):
-    """Executa o modelo e retorna histórico. Recebe tupla para ser hashável."""
     params = dict(params_tuple)
     model = DeforestationModel(params)
     model.run()
@@ -61,20 +61,12 @@ params = {
     "grid_size": grid_size,
     "n_years": n_years,
     "seed": int(seed),
-    "Pd": Pd,
-    "Pa": Pa,
-    "P_inq": P_inq,
-    "P_acp": P_acp,
-    "P_cond": P_cond,
-    "P_exec": P_exec,
-    "V_ACP": float(V_ACP),
-    "t_acp": float(t_acp),
-    "Gp": float(Gp),
-    "Ga": float(Ga),
-    "Gt": float(Gt),
+    "Pd": Pd, "Pa": Pa,
+    "P_inq": P_inq, "P_acp": P_acp, "P_cond": P_cond, "P_exec": P_exec,
+    "V_ACP": float(V_ACP), "t_acp": float(t_acp),
+    "Gp": float(Gp), "Ga": float(Ga), "Gt": float(Gt),
 }
 
-# Converter para tupla para cache
 params_tuple = tuple(sorted(params.items()))
 history = run_simulation(params_tuple)
 
@@ -82,18 +74,48 @@ if not history:
     st.error("A simulação não gerou resultados.")
     st.stop()
 
-# ── Slider de ano ───────────────────────────────────────────────────
+# ── Controles: slider de ano + botão Play ───────────────────────────
 max_year = len(history) - 1
-selected_year = st.slider("Ano da simulação", 0, max_year, max_year,
-                          help="Navegue pela evolução do município ao longo do tempo.")
+
+# Inicializar estado do play
+if "playing" not in st.session_state:
+    st.session_state.playing = False
+if "play_year" not in st.session_state:
+    st.session_state.play_year = 0
+
+ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([1, 1, 6])
+with ctrl_col1:
+    play_btn = st.button("▶ Play", use_container_width=True)
+with ctrl_col2:
+    stop_btn = st.button("⏹ Stop", use_container_width=True)
+
+if play_btn:
+    st.session_state.playing = True
+    st.session_state.play_year = 0
+if stop_btn:
+    st.session_state.playing = False
+
+# Se play está ativo, auto-avançar
+if st.session_state.playing:
+    selected_year = st.session_state.play_year
+    if selected_year >= max_year:
+        st.session_state.playing = False
+        selected_year = max_year
+else:
+    selected_year = st.slider(
+        "Ano da simulação", 0, max_year, max_year,
+        help="Navegue pela evolução do município ao longo do tempo."
+    )
 
 snapshot = history[selected_year]
 
 # ── Métricas rápidas ────────────────────────────────────────────────
+st.markdown(f"### Ano {snapshot['year']} de {max_year}")
+
 col1, col2, col3, col4, col5 = st.columns(5)
 with col1:
     st.metric("Floresta", f"{snapshot['pct_forest']:.1f}%",
-              delta=f"{snapshot['pct_forest'] - history[0]['pct_forest']:.1f}%")
+              delta=f"{snapshot['pct_forest'] - history[0]['pct_forest']:.1f}pp")
 with col2:
     st.metric("Pastagem", f"{snapshot['pct_pasture']:.1f}%")
 with col3:
@@ -106,18 +128,30 @@ with col5:
               delta="Compensa" if C > 0 else "Não compensa",
               delta_color="inverse")
 
+# ── Indicadores de dissuasão (legíveis) ─────────────────────────────
+d1, d2, d3, d4 = st.columns(4)
+with d1:
+    st.markdown(f"**VD admin:** R$ {snapshot['VD_admin']:,.2f}/ha")
+with d2:
+    st.markdown(f"**VD ACP:** R$ {snapshot['VD_acp']:,.2f}/ha")
+with d3:
+    st.markdown(f"**VD total:** R$ {snapshot['VD_total']:,.2f}/ha")
+with d4:
+    st.markdown(f"**VE:** R$ {snapshot['VE']:,.0f}/ha")
+
 # ── 3 Painéis ───────────────────────────────────────────────────────
 st.markdown("---")
 
 # Painel 1: Mapa
 st.subheader("Mapa do Município")
+map_placeholder = st.empty()
 fig_map = plot_grid_map(
     snapshot["grid"],
     boundaries=snapshot.get("boundaries"),
     figsize=(10, 10),
     dpi=150,
 )
-st.pyplot(fig_map, use_container_width=True)
+map_placeholder.pyplot(fig_map, use_container_width=True)
 
 # Painel 2: Trajetória
 st.subheader("Trajetória Temporal")
@@ -148,3 +182,9 @@ with st.expander("Dados de fiscalização por ano"):
         })
     df = pd.DataFrame(rows)
     st.dataframe(df, use_container_width=True, hide_index=True)
+
+# ── Lógica de auto-play (rerun) ─────────────────────────────────────
+if st.session_state.playing and selected_year < max_year:
+    time.sleep(0.8)
+    st.session_state.play_year = selected_year + 1
+    st.rerun()

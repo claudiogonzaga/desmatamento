@@ -14,6 +14,7 @@ from mesa.space import MultiGrid
 from mesa.time import RandomActivation
 from mesa.datacollection import DataCollector
 from math import exp
+from collections import deque
 
 
 # ── Estados da célula ────────────────────────────────────────────────
@@ -48,16 +49,15 @@ class LandCell(Agent):
 
     def __init__(self, unique_id, model, pos, state=FOREST):
         super().__init__(unique_id, model)
-        self._init_pos = pos  # pos will be set by place_agent
+        self._init_pos = pos
         self.state = state
-        self.owner_id = None          # ID do proprietário
-        self.years_degraded = 0       # anos em degradação
-        self.years_regenerating = 0   # anos em regeneração
-        self.embargo_year = None      # ano em que foi embargada
-        self.converted_year = None    # ano da conversão
+        self.owner_id = None
+        self.years_degraded = 0
+        self.years_regenerating = 0
+        self.embargo_year = None
+        self.converted_year = None
 
     def step(self):
-        # Degradação natural de pastagem sem manejo
         if self.state == PASTURE:
             owner = self._get_owner()
             degrade_prob = 0.02 if owner and owner.profile == "sojicultor" else 0.04
@@ -65,7 +65,6 @@ class LandCell(Agent):
                 self.state = DEGRADED_PASTURE
                 self.years_degraded = 0
 
-        # Contagem de degradação → regeneração se abandonada
         if self.state == DEGRADED_PASTURE:
             self.years_degraded += 1
             if self.years_degraded > 15:
@@ -73,7 +72,6 @@ class LandCell(Agent):
                     self.state = REGENERATING
                     self.years_regenerating = 0
 
-        # Regeneração lenta
         if self.state == REGENERATING:
             self.years_regenerating += 1
             if self.years_regenerating >= 20:
@@ -96,7 +94,7 @@ class Landholder(Agent):
             "alpha_range": (0.6, 0.9),
             "delta_range": (0.12, 0.18),
             "uso_principal": "pecuaria",
-            "convert_rate": (1, 5),   # hectares por ano se decidir
+            "convert_rate": (1, 5),
         },
         "grande_pecuarista": {
             "size_range": (200, 2000),
@@ -114,10 +112,12 @@ class Landholder(Agent):
         },
     }
 
-    def __init__(self, unique_id, model, profile, cells):
+    def __init__(self, unique_id, model, profile, cells, prop_rect):
         super().__init__(unique_id, model)
         self.profile = profile
-        self.cells = cells  # lista de (x, y)
+        self.cells = cells
+        self.cells_set = set(cells)
+        self.prop_rect = prop_rect  # (x0, y0, x1, y1)
         cfg = self.PROFILES[profile]
         self.alpha = self.random.uniform(*cfg["alpha_range"])
         self.delta = self.random.uniform(*cfg["delta_range"])
@@ -129,7 +129,7 @@ class Landholder(Agent):
         self.embargoed = False
         self.embargo_year = None
         self.total_converted = 0
-        self.acp_pending_values = []   # (valor, ano_ajuizamento)
+        self.acp_pending_values = []
 
     @property
     def total_cells(self):
@@ -166,12 +166,10 @@ class Landholder(Agent):
 
     @property
     def legal_reserve_target(self):
-        """80% na Amazônia Legal."""
         return 0.80
 
     @property
     def convertible_forest(self):
-        """Floresta que pode ser convertida (acima da reserva legal)."""
         total = self.total_cells
         forest = self.forest_cells_count
         lr = self.legal_reserve_cells
@@ -180,24 +178,27 @@ class Landholder(Agent):
         return max(0, available)
 
     def _neighbor_conversion_pressure(self):
-        """Fração de vizinhos já convertidos (efeito fronteira)."""
+        """Fração de vizinhos já convertidos (efeito fronteira) — amostragem."""
+        # Amostra para performance
+        sample_cells = self.cells if len(self.cells) < 50 else \
+            self.random.sample(self.cells, 50)
         converted = 0
         total_neighbors = 0
-        for pos in self.cells:
-            neighbors = self.model.grid.get_neighborhood(pos, moore=True, include_center=False)
+        for pos in sample_cells:
+            neighbors = self.model.grid.get_neighborhood(
+                pos, moore=True, include_center=False
+            )
             for npos in neighbors:
-                contents = self.model.grid.get_cell_list_contents([npos])
-                for c in contents:
-                    if isinstance(c, LandCell):
-                        total_neighbors += 1
-                        if c.state in (PASTURE, SOY):
-                            converted += 1
+                cell = self.model._cells.get(npos)
+                if cell:
+                    total_neighbors += 1
+                    if cell.state in (PASTURE, SOY):
+                        converted += 1
         if total_neighbors == 0:
             return 0
         return converted / total_neighbors
 
     def _calc_VE(self):
-        """Vantagem econômica do desmatamento por hectare."""
         p = self.model.params
         Gf = p["Gf"]
         Cp = p["Cp"]
@@ -209,32 +210,16 @@ class Landholder(Agent):
         return Gf + (G_uso * Cp) + Gt
 
     def _calc_VD_admin(self):
-        """Dissuasão administrativa (Schmitt)."""
         p = self.model.params
-        Pd = p["Pd"]
-        Pa = p["Pa"]
-        Pj = p["Pj"]
-        Pc = p["Pc"]
-        Pp = p["Pp"]
-        S = p["S"]
-        Ve = p["Ve"]
-        Va = p["Va"]
-        r = p["r"]
-        t = p["t_admin"]
-        return Pd * Pa * Pj * Pc * Pp * (S + Ve + Va) * exp(-r * t)
+        return (p["Pd"] * p["Pa"] * p["Pj"] * p["Pc"] * p["Pp"]
+                * (p["S"] + p["Ve"] + p["Va"])
+                * exp(-p["r"] * p["t_admin"]))
 
     def _calc_VD_acp(self):
-        """Dissuasão via ACP ambiental."""
         p = self.model.params
-        Pd = p["Pd"]
-        P_inq = p["P_inq"]
-        P_acp = p["P_acp"]
-        P_cond = p["P_cond"]
-        P_exec = p["P_exec"]
-        V_ACP = p["V_ACP"]
-        r = p["r"]
-        t_acp = p["t_acp"]
-        return Pd * P_inq * P_acp * P_cond * P_exec * V_ACP * exp(-r * t_acp)
+        return (p["Pd"] * p["P_inq"] * p["P_acp"] * p["P_cond"] * p["P_exec"]
+                * p["V_ACP"]
+                * exp(-p["r"] * p["t_acp"]))
 
     def _sigmoid(self, x):
         x = np.clip(x, -500, 500)
@@ -243,24 +228,23 @@ class Landholder(Agent):
     def step(self):
         p = self.model.params
 
-        # Receita anual das áreas já convertidas
+        # Receita anual
         n_pasture = self._count_state(PASTURE)
         n_soy = self._count_state(SOY)
         self.wealth += n_pasture * p["Gp"] + n_soy * p["Ga"]
 
-        # Custos de ACPs pendentes (pagamento eventual)
+        # ACPs pendentes
         new_pending = []
         for valor, ano in self.acp_pending_values:
             elapsed = self.model.year - ano
             if elapsed >= p["t_acp"]:
-                # Execução
                 if self.random.random() < p["P_exec"]:
                     self.wealth -= valor
             else:
                 new_pending.append((valor, ano))
         self.acp_pending_values = new_pending
 
-        # Desembargo após 3 anos se não reincidiu
+        # Desembargo
         if self.embargoed and self.embargo_year is not None:
             if self.model.year - self.embargo_year >= 3:
                 self.embargoed = False
@@ -270,9 +254,8 @@ class Landholder(Agent):
                     if cell and cell.state == EMBARGOED:
                         cell.state = DEGRADED_PASTURE
 
-        # ── Decisão de conversão ──
+        # Decisão de conversão
         if self.embargoed:
-            # Pode descumprir embargo com baixa probabilidade
             if self.random.random() > (1 - p["Pd"]) * 0.3:
                 return
 
@@ -285,22 +268,16 @@ class Landholder(Agent):
         VD_acp = self._calc_VD_acp()
         VD_total = VD_admin + VD_acp
         c = p["c_desmat"]
-
         C = VE - (VD_total + c)
 
-        # Efeito vizinhança
         neighbor_pressure = self._neighbor_conversion_pressure()
-        C_adjusted = C + neighbor_pressure * 500  # bonus vizinhança
+        C_adjusted = C + neighbor_pressure * 500
 
-        # Aversão ao risco modera a decisão
         prob = self._sigmoid(C_adjusted / (1000 * self.alpha))
-
-        # Reincidentes ficam mais ousados
         if self.n_infractions > 0:
             prob = min(1.0, prob * 1.1)
 
         if self.random.random() < prob:
-            # Decide converter
             max_conv = min(self.convert_max, available)
             if max_conv <= 0:
                 return
@@ -309,78 +286,112 @@ class Landholder(Agent):
             if n_convert <= 0:
                 return
 
-            self._convert_cells(n_convert)
-            self.model.annual_converted += n_convert
-            self.total_converted += n_convert
+            actually_converted = self._convert_cells_contiguous(n_convert)
+            self.model.annual_converted += actually_converted
+            self.total_converted += actually_converted
 
-            # ── Fiscalização ──
-            # Detecção
-            if self.random.random() < p["Pd"]:
-                self.model.annual_detected += n_convert
-                # Autuação
-                if self.random.random() < p["Pa"]:
-                    self.n_infractions += 1
-                    self.model.annual_infractions += 1
-                    multa = n_convert * p["S"]
-                    # Embargo
-                    if self.random.random() < 0.7:
-                        self.embargoed = True
-                        self.embargo_year = self.model.year
-                        self.model.annual_embargoes += 1
-                        self._embargo_converted(n_convert)
+            if actually_converted > 0:
+                self._apply_enforcement(actually_converted)
 
-                    # MP abre inquérito? (mais provável para grandes)
-                    p_inq_eff = p["P_inq"]
-                    if n_convert > 50:
-                        p_inq_eff *= 2.0
-                    p_inq_eff = min(p_inq_eff, 1.0)
-
-                    if self.random.random() < p_inq_eff:
-                        # ACP ajuizada?
-                        if self.random.random() < p["P_acp"]:
-                            # Condenação?
-                            if self.random.random() < p["P_cond"]:
-                                valor_acp = n_convert * p["V_ACP"]
-                                self.n_acps += 1
-                                self.acp_pending_values.append(
-                                    (valor_acp, self.model.year)
-                                )
-                                self.model.annual_acps += 1
-
-    def _convert_cells(self, n):
-        """Converte n hectares de floresta, priorizando bordas."""
-        forest_cells = []
-        for pos in self.cells:
-            cell = self._cell_at(pos)
-            if cell and cell.state == FOREST:
-                # Score: prioriza bordas com áreas já convertidas
-                neighbors = self.model.grid.get_neighborhood(
-                    pos, moore=True, include_center=False
-                )
-                edge_score = 0
-                for npos in neighbors:
-                    contents = self.model.grid.get_cell_list_contents([npos])
-                    for nc in contents:
-                        if isinstance(nc, LandCell) and nc.state in (PASTURE, SOY, ROAD):
-                            edge_score += 1
-                forest_cells.append((pos, edge_score))
-
-        # Ordena por score de borda (prioriza fronteira)
-        forest_cells.sort(key=lambda x: -x[1])
-
+    def _convert_cells_contiguous(self, n):
+        """
+        Converte n hectares como BLOCO CONTÍGUO, expandindo a partir
+        da borda existente de pastagem/soja/estrada (como desmatamento real).
+        Usa BFS (flood-fill) a partir das sementes de borda.
+        """
         target_state = SOY if self.uso_principal == "soja" else PASTURE
-        converted = 0
-        for pos, _ in forest_cells:
-            if converted >= n:
-                break
-            cell = self._cell_at(pos)
+
+        # Encontrar sementes: células de floresta adjacentes a área já convertida/estrada
+        seeds = []
+        for pos in self.cells:
+            cell = self.model._cells.get(pos)
+            if cell and cell.state == FOREST:
+                # Verificar se é borda (adjacente a convertido)
+                neighbors = self.model.grid.get_neighborhood(
+                    pos, moore=False, include_center=False  # Von Neumann = 4 vizinhos
+                )
+                is_edge = False
+                for npos in neighbors:
+                    ncell = self.model._cells.get(npos)
+                    if ncell and ncell.state in (PASTURE, SOY, ROAD, DEGRADED_PASTURE, EMBARGOED):
+                        is_edge = True
+                        break
+                if is_edge:
+                    seeds.append(pos)
+
+        # Se não há sementes de borda, pegar floresta mais próxima da estrada
+        if not seeds:
+            x0, y0, x1, y1 = self.prop_rect
+            road_y = self.model.params["grid_size"] // 2
+            road_x = self.model.params["grid_size"] // 2
+            forest_cells = []
+            for pos in self.cells:
+                cell = self.model._cells.get(pos)
+                if cell and cell.state == FOREST:
+                    dist = min(abs(pos[0] - road_x), abs(pos[1] - road_y))
+                    forest_cells.append((pos, dist))
+            if not forest_cells:
+                return 0
+            forest_cells.sort(key=lambda x: x[1])
+            seeds = [forest_cells[0][0]]
+
+        # BFS a partir das sementes — expande em bloco contíguo
+        queue = deque(seeds)
+        visited = set(seeds)
+        to_convert = []
+
+        while queue and len(to_convert) < n:
+            pos = queue.popleft()
+            cell = self.model._cells.get(pos)
+            if cell and cell.state == FOREST and pos in self.cells_set:
+                to_convert.append(pos)
+                # Adicionar vizinhos (4-vizinhança para blocos mais compactos)
+                neighbors = self.model.grid.get_neighborhood(
+                    pos, moore=False, include_center=False
+                )
+                for npos in neighbors:
+                    if npos not in visited and npos in self.cells_set:
+                        ncell = self.model._cells.get(npos)
+                        if ncell and ncell.state == FOREST:
+                            visited.add(npos)
+                            queue.append(npos)
+
+        # Converter
+        for pos in to_convert:
+            cell = self.model._cells.get(pos)
             if cell:
                 cell.state = target_state
                 cell.converted_year = self.model.year
-                converted += 1
+
+        return len(to_convert)
+
+    def _apply_enforcement(self, n_convert):
+        """Fiscalização após conversão."""
+        p = self.model.params
+
+        if self.random.random() < p["Pd"]:
+            self.model.annual_detected += n_convert
+            if self.random.random() < p["Pa"]:
+                self.n_infractions += 1
+                self.model.annual_infractions += 1
+                if self.random.random() < 0.7:
+                    self.embargoed = True
+                    self.embargo_year = self.model.year
+                    self.model.annual_embargoes += 1
+                    self._embargo_converted(n_convert)
+
+                p_inq_eff = min(p["P_inq"] * (2.0 if n_convert > 50 else 1.0), 1.0)
+                if self.random.random() < p_inq_eff:
+                    if self.random.random() < p["P_acp"]:
+                        if self.random.random() < p["P_cond"]:
+                            valor_acp = n_convert * p["V_ACP"]
+                            self.n_acps += 1
+                            self.acp_pending_values.append(
+                                (valor_acp, self.model.year)
+                            )
+                            self.model.annual_acps += 1
 
     def _embargo_converted(self, n):
-        """Marca células recém-convertidas como embargadas."""
         count = 0
         for pos in self.cells:
             cell = self._cell_at(pos)
@@ -397,36 +408,13 @@ class DeforestationModel(Model):
     """Modelo ABM de desmatamento ilegal em município da Amazônia Legal."""
 
     DEFAULT_PARAMS = {
-        # Fiscalização administrativa (Schmitt 2015, atualizado)
-        "Pd": 0.55,      # prob. detecção
-        "Pa": 0.30,       # prob. autuação
-        "Pj": 0.26,       # prob. julgamento 1ª inst.
-        "Pc": 0.90,       # prob. confirmação
-        "Pp": 0.10,       # prob. pagamento
-        "S": 5000.0,      # multa R$/ha
-        "Ve": 300.0,      # valor embargo (lucro cessante)
-        "Va": 15185.22,   # valor bens apreendidos
-        "t_admin": 2.9,   # tempo médio julgamento admin (anos)
-        # ACP (novo)
-        "P_inq": 0.08,    # prob. inquérito MP
-        "P_acp": 0.40,    # prob. ACP ajuizada
-        "P_cond": 0.65,   # prob. condenação
-        "P_exec": 0.30,   # prob. execução sentença
-        "V_ACP": 15000.0, # valor ACP R$/ha
-        "t_acp": 7.0,     # tempo até execução (anos)
-        # Economia
-        "Gf": 2000.0,     # ganho floresta ilegal
-        "Gp": 300.0,      # ganho pecuária R$/ha/ano
-        "Ga": 500.0,      # ganho soja R$/ha/ano
-        "Gt": 5000.0,     # ganho valorização terra
-        "Cp": 5,          # coef. prescrição (anos)
-        "c_desmat": 200.0, # custo desmatamento R$/ha
-        "r": 0.1375,      # taxa Selic
-        # Grid e agentes
-        "grid_size": 100,
-        "n_properties": 40,
-        "n_years": 15,
-        "seed": 42,
+        "Pd": 0.55, "Pa": 0.30, "Pj": 0.26, "Pc": 0.90, "Pp": 0.10,
+        "S": 5000.0, "Ve": 300.0, "Va": 15185.22, "t_admin": 2.9,
+        "P_inq": 0.08, "P_acp": 0.40, "P_cond": 0.65, "P_exec": 0.30,
+        "V_ACP": 15000.0, "t_acp": 7.0,
+        "Gf": 2000.0, "Gp": 300.0, "Ga": 500.0, "Gt": 5000.0,
+        "Cp": 5, "c_desmat": 200.0, "r": 0.1375,
+        "grid_size": 100, "n_properties": 40, "n_years": 15, "seed": 42,
     }
 
     def __init__(self, params=None):
@@ -448,7 +436,6 @@ class DeforestationModel(Model):
         self.annual_infractions = 0
         self.annual_embargoes = 0
         self.annual_acps = 0
-
         self.history = []
 
         # Criar células
@@ -462,15 +449,15 @@ class DeforestationModel(Model):
                 self._cells[(x, y)] = cell
                 cell_id += 1
 
-        # Criar rede de estradas (simples: cruz central + bordas)
+        # Estradas
         self._create_roads(N)
 
-        # Criar propriedades
+        # Propriedades
         self._agent_id_counter = cell_id
         self.landholders = []
         self._create_properties(N)
 
-        # Marcar reservas legais nas propriedades
+        # Reserva legal no fundo da propriedade (longe das estradas)
         self._assign_legal_reserves()
 
         # DataCollector
@@ -506,10 +493,7 @@ class DeforestationModel(Model):
     def _pct_state(self, state):
         N = self.params["grid_size"]
         total = N * N
-        count = sum(
-            1 for cell in self._cells.values()
-            if cell.state == state
-        )
+        count = sum(1 for cell in self._cells.values() if cell.state == state)
         return count / total * 100
 
     def _mean_VD_admin(self):
@@ -534,50 +518,18 @@ class DeforestationModel(Model):
         return self._mean_VE() - (self._mean_VD_total() + self.params["c_desmat"])
 
     def _create_roads(self, N):
-        """Estradas em cruz + bordas."""
+        """Estradas em cruz."""
         mid = N // 2
         for i in range(N):
             for pos in [(mid, i), (i, mid)]:
                 cell = self._cells.get(pos)
                 if cell:
                     cell.state = ROAD
-            # Bordas
-            for pos in [(0, i), (N-1, i), (i, 0), (i, N-1)]:
-                cell = self._cells.get(pos)
-                if cell and self.random.random() < 0.3:
-                    cell.state = ROAD
-
-    def _create_water(self, N):
-        """Rio sinuoso."""
-        y = N // 3
-        for x in range(N):
-            dy = int(3 * np.sin(x * 2 * np.pi / N))
-            for w in range(-1, 2):
-                yw = y + dy + w
-                if 0 <= yw < N:
-                    cell = self._cells.get((x, yw))
-                    if cell and cell.state != ROAD:
-                        cell.state = WATER
-
-    def _create_app(self, N):
-        """APP: 30m (≈1 célula) ao redor de água."""
-        water_cells = [
-            pos for pos, cell in self._cells.items()
-            if cell.state == WATER
-        ]
-        for pos in water_cells:
-            neighbors = self.grid.get_neighborhood(pos, moore=True, include_center=False)
-            for npos in neighbors:
-                cell = self._cells.get(npos)
-                if cell and cell.state == FOREST:
-                    cell.state = APP
 
     def _create_properties(self, N):
-        """Particiona o grid em propriedades retangulares."""
         np_rng = np.random.RandomState(self.params["seed"])
         n_props = self.params["n_properties"]
 
-        # Distribuição de perfis
         n_pequeno = max(1, int(n_props * 0.45))
         n_grande = max(1, int(n_props * 0.35))
         n_soja = max(1, n_props - n_pequeno - n_grande)
@@ -588,14 +540,6 @@ class DeforestationModel(Model):
             + ["sojicultor"] * n_soja
         )
         np_rng.shuffle(profiles)
-
-        # Particionar grid em retângulos via subdivisão recursiva
-        available = set()
-        for x in range(N):
-            for y in range(N):
-                cell = self._cells.get((x, y))
-                if cell and cell.state == FOREST:
-                    available.add((x, y))
 
         rects = self._partition_grid(N, n_props, np_rng)
 
@@ -612,7 +556,7 @@ class DeforestationModel(Model):
 
             agent_id = self._agent_id_counter
             self._agent_id_counter += 1
-            lh = Landholder(agent_id, self, profile, cells)
+            lh = Landholder(agent_id, self, profile, cells, rect)
             self.schedule.add(lh)
             self.landholders.append(lh)
 
@@ -622,21 +566,16 @@ class DeforestationModel(Model):
                     cell.owner_id = agent_id
 
     def _partition_grid(self, N, n_parts, rng):
-        """Subdivide grid em retângulos aproximadamente iguais."""
         rects = [(0, 0, N, N)]
-
         while len(rects) < n_parts:
-            # Pega o maior retângulo e divide
             rects.sort(key=lambda r: -(r[2]-r[0]) * (r[3]-r[1]))
             rect = rects.pop(0)
             x0, y0, x1, y1 = rect
             w = x1 - x0
             h = y1 - y0
-
             if w <= 2 and h <= 2:
                 rects.append(rect)
                 break
-
             if w >= h and w > 2:
                 split = x0 + max(1, int(w * rng.uniform(0.3, 0.7)))
                 rects.append((x0, y0, split, y1))
@@ -648,35 +587,39 @@ class DeforestationModel(Model):
             else:
                 rects.append(rect)
                 break
-
         return rects[:n_parts]
 
     def _assign_legal_reserves(self):
-        """Marca 80% da floresta de cada propriedade como Reserva Legal."""
+        """
+        Reserva legal no FUNDO da propriedade (longe das estradas).
+        As estradas cruzam no centro do grid — então a RL fica nos cantos.
+        """
+        road_x = self.params["grid_size"] // 2
+        road_y = self.params["grid_size"] // 2
+
         for lh in self.landholders:
             forest_in_prop = []
             for pos in lh.cells:
                 cell = self._cells.get(pos)
                 if cell and cell.state == FOREST:
-                    forest_in_prop.append(pos)
+                    # Distância Manhattan da estrada mais próxima
+                    dist = min(abs(pos[0] - road_x), abs(pos[1] - road_y))
+                    forest_in_prop.append((pos, dist))
 
             if not forest_in_prop:
                 continue
 
-            # 80% da propriedade deve ser RL
-            # Mas queremos que parte seja convertível (senão não há dinâmica)
-            # Na prática, marcamos ~60% como RL (o que já está irregular por definição
-            # visto que a lei exige 80%)
+            # Ordenar por distância DECRESCENTE — mais longe = fundo = RL
+            forest_in_prop.sort(key=lambda x: -x[1])
+
+            # 55% da propriedade como RL (irregular, mas cria dinâmica)
             n_lr = int(len(forest_in_prop) * 0.55)
-            # Marca as mais internas como RL
-            self.random.shuffle(forest_in_prop)
-            for pos in forest_in_prop[:n_lr]:
+            for pos, _ in forest_in_prop[:n_lr]:
                 cell = self._cells.get(pos)
                 if cell:
                     cell.state = LEGAL_RESERVE
 
     def get_grid_array(self):
-        """Retorna array NxN com os estados das células."""
         N = self.params["grid_size"]
         arr = np.zeros((N, N), dtype=int)
         for (x, y), cell in self._cells.items():
@@ -684,7 +627,6 @@ class DeforestationModel(Model):
         return arr
 
     def get_property_boundaries(self):
-        """Retorna lista de retângulos (x0,y0,w,h) e info por propriedade."""
         boundaries = []
         for lh in self.landholders:
             if not lh.cells:
@@ -702,20 +644,8 @@ class DeforestationModel(Model):
             })
         return boundaries
 
-    def step(self):
-        """Executa um passo (= 1 ano)."""
-        self.year += 1
-        self.annual_converted = 0
-        self.annual_detected = 0
-        self.annual_infractions = 0
-        self.annual_embargoes = 0
-        self.annual_acps = 0
-
-        self.schedule.step()
-        self.datacollector.collect(self)
-
-        # Salvar snapshot
-        self.history.append({
+    def _make_snapshot(self):
+        return {
             "year": self.year,
             "grid": self.get_grid_array().copy(),
             "pct_forest": self._pct_state(FOREST),
@@ -734,34 +664,25 @@ class DeforestationModel(Model):
             "VE": self._mean_VE(),
             "C": self._mean_C(),
             "boundaries": self.get_property_boundaries(),
-        })
+        }
+
+    def step(self):
+        self.year += 1
+        self.annual_converted = 0
+        self.annual_detected = 0
+        self.annual_infractions = 0
+        self.annual_embargoes = 0
+        self.annual_acps = 0
+
+        self.schedule.step()
+        self.datacollector.collect(self)
+        self.history.append(self._make_snapshot())
 
     def run(self, n_years=None):
-        """Roda a simulação completa."""
         if n_years is None:
             n_years = self.params["n_years"]
-        # Coleta estado inicial
         self.datacollector.collect(self)
-        self.history.append({
-            "year": 0,
-            "grid": self.get_grid_array().copy(),
-            "pct_forest": self._pct_state(FOREST),
-            "pct_pasture": self._pct_state(PASTURE),
-            "pct_soy": self._pct_state(SOY),
-            "pct_degraded": self._pct_state(DEGRADED_PASTURE),
-            "pct_embargoed": self._pct_state(EMBARGOED),
-            "pct_regenerating": self._pct_state(REGENERATING),
-            "annual_converted": 0,
-            "annual_infractions": 0,
-            "annual_embargoes": 0,
-            "annual_acps": 0,
-            "VD_admin": self._mean_VD_admin(),
-            "VD_acp": self._mean_VD_acp(),
-            "VD_total": self._mean_VD_total(),
-            "VE": self._mean_VE(),
-            "C": self._mean_C(),
-            "boundaries": self.get_property_boundaries(),
-        })
+        self.history.append(self._make_snapshot())
         for _ in range(n_years):
             self.step()
         return self.datacollector.get_model_vars_dataframe()
